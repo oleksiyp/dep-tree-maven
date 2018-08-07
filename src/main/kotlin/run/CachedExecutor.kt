@@ -46,7 +46,7 @@ class CachedExecutor<K, R>(
     suspend fun submit(
         key: K,
         waitTimeout: Long = 0,
-        defaultValue: (() -> R?)? = null,
+        defaultValue: () -> R? = { null },
         taskFunc: suspend () -> R
     ): Deferred<R> {
 
@@ -60,7 +60,7 @@ class CachedExecutor<K, R>(
             task.deferred
         }
 
-        if (waitTimeout > 0 && defaultValue != null) {
+        if (waitTimeout > 0) {
             val value = defaultValue() ?: return deferred
             return async {
                 select<R> {
