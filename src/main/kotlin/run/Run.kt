@@ -1,13 +1,18 @@
 package run
 
 import org.apache.maven.artifact.DefaultArtifact
+import org.apache.maven.artifact.handler.DefaultArtifactHandler
 import org.apache.maven.artifact.repository.ArtifactRepository
 import org.apache.maven.artifact.repository.ArtifactRepositoryPolicy
 import org.apache.maven.artifact.repository.MavenArtifactRepository
 import org.apache.maven.artifact.repository.layout.DefaultRepositoryLayout
 import org.apache.maven.execution.*
+import org.apache.maven.lifecycle.internal.LifecycleDependencyResolver
 import org.apache.maven.lifecycle.internal.MojoDescriptorCreator
+import org.apache.maven.lifecycle.internal.MojoExecutor
+import org.apache.maven.lifecycle.internal.ProjectIndex
 import org.apache.maven.model.Dependency
+import org.apache.maven.model.Plugin
 import org.apache.maven.plugin.Mojo
 import org.apache.maven.plugin.MojoExecution
 import org.apache.maven.plugin.PluginParameterExpressionEvaluator
@@ -15,9 +20,18 @@ import org.apache.maven.plugin.descriptor.MojoDescriptor
 import org.apache.maven.plugin.descriptor.Parameter
 import org.apache.maven.plugin.descriptor.PluginDescriptorBuilder
 import org.apache.maven.plugins.dependency.tree.TreeMojo
+import org.apache.maven.project.DefaultProjectBuilder
+import org.apache.maven.project.DefaultProjectBuildingRequest
 import org.apache.maven.project.MavenProject
+import org.apache.maven.project.ProjectBuilder
 import org.apache.maven.repository.RepositorySystem
 import org.apache.maven.repository.internal.MavenRepositorySystemSession
+import org.apache.maven.repository.legacy.TransferListenerAdapter
+import org.apache.maven.settings.Mirror
+import org.apache.maven.settings.Proxy
+import org.apache.maven.shared.dependency.analyzer.DefaultProjectDependencyAnalyzer
+import org.apache.maven.shared.dependency.analyzer.DependencyAnalyzer
+import org.apache.maven.shared.dependency.analyzer.ProjectDependencyAnalyzer
 import org.codehaus.plexus.*
 import org.codehaus.plexus.classworlds.ClassWorld
 import org.codehaus.plexus.component.configurator.ComponentConfigurator
@@ -28,9 +42,12 @@ import org.codehaus.plexus.util.ReaderFactory
 import org.codehaus.plexus.util.StringUtils
 import org.codehaus.plexus.util.xml.Xpp3Dom
 import org.sonatype.aether.impl.internal.SimpleLocalRepositoryManager
+import org.sonatype.aether.transfer.TransferEvent
+import org.sonatype.aether.transfer.TransferListener
 
 import java.io.*
 import java.util.*
+import kotlin.coroutines.experimental.coroutineContext
 
 class Run(baseDir: String) {
     private val classWorld = ClassWorld("plexus.core", Thread.currentThread().contextClassLoader)
@@ -68,6 +85,10 @@ class Run(baseDir: String) {
         pluginDescriptor.mojos.forEach { mojoDescriptor ->
             mojoDescriptors[mojoDescriptor.goal] = mojoDescriptor
         }
+        val plugin = Plugin()
+        plugin.groupId = artifact.groupId
+        plugin.artifactId = artifact.artifactId
+        pluginDescriptor.plugin = plugin
     }
 
     @Throws(Exception::class)
@@ -150,16 +171,41 @@ fun main(args: Array<String>) {
     val baseDir = File("").absolutePath
     val run = Run(baseDir)
     try {
-        val project = MavenProject()
-        project.artifact = DefaultArtifact("abc", "def", "1.0", "compile", "jar", "", null)
-        val dep = Dependency()
-        dep.groupId = "io.mockk"
-        dep.artifactId = "mockk"
-        dep.version = "1.8.6"
-        dep.scope = "test"
-        project.dependencies = listOf(dep)
 
-        val request = DefaultMavenExecutionRequest()
+        val repositorySystemSession = MavenRepositorySystemSession()
+        repositorySystemSession.transferListener = object : TransferListener {
+            override fun transferStarted(event: TransferEvent) {
+                println("Started ${event.resource}")
+            }
+
+            override fun transferInitiated(event: TransferEvent) {
+                println("Initiated ${event.resource}")
+            }
+
+            override fun transferSucceeded(event: TransferEvent) {
+                println("Succeded ${event.resource}")
+            }
+
+            override fun transferProgressed(event: TransferEvent) {
+                println("Progressed ${event.resource}")
+            }
+
+            override fun transferCorrupted(event: TransferEvent) {
+                println("Corrupted ${event.resource}")
+            }
+
+            override fun transferFailed(event: TransferEvent?) {
+                TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
+            }
+        }
+
+        repositorySystemSession.localRepositoryManager = SimpleLocalRepositoryManager(
+            File("/home/oleksiyp/workspace/dep-tree-maven/repo")
+        )
+
+        val builder = run.container.lookup(ProjectBuilder::class.java)
+        val prjBuildRequest = DefaultProjectBuildingRequest()
+        prjBuildRequest.repositorySession = repositorySystemSession
 
         val repo = MavenArtifactRepository(
             "id",
@@ -168,7 +214,7 @@ fun main(args: Array<String>) {
             ArtifactRepositoryPolicy(true, "always", "never"),
             ArtifactRepositoryPolicy(true, "always", "never")
         )
-        request.localRepository = repo
+        prjBuildRequest.localRepository = repo
         val mavenCentral = MavenArtifactRepository(
             "id",
             "https://repo.maven.apache.org/maven2/",
@@ -176,29 +222,89 @@ fun main(args: Array<String>) {
             ArtifactRepositoryPolicy(true, "always", "never"),
             ArtifactRepositoryPolicy(true, "always", "never")
         )
-        request.remoteRepositories = listOf<ArtifactRepository>(mavenCentral)
-        project.remoteArtifactRepositories = listOf<ArtifactRepository>(mavenCentral)
+        prjBuildRequest.remoteRepositories = listOf<ArtifactRepository>(mavenCentral)
 
-
-        val result = DefaultMavenExecutionResult()
-        val repositorySystemSession = MavenRepositorySystemSession()
-
-        repositorySystemSession.localRepositoryManager = SimpleLocalRepositoryManager(
-            File("/home/oleksiyp/workspace/dep-tree-maven/repo")
+        val prjBuildResult = builder.build(
+            DefaultArtifact(
+                "io.mockk",
+                "mockk",
+                "1.8.6",
+                "compile",
+                "pom",
+                "",
+                DefaultArtifactHandler("pom")
+            ),
+            true,
+            prjBuildRequest
         )
+
+        val project = prjBuildResult.project
+
+
+        val request = DefaultMavenExecutionRequest()
+        val result = DefaultMavenExecutionResult()
 
         val session = MavenSession(run.container, repositorySystemSession, request, result)
 
         session.currentProject = project
         session.projects = listOf(project)
-        val mojoExecution = run.newMojoExecution("tree")
 
-        val mojo = run.lookupConfiguredMojo(session, mojoExecution) as TreeMojo
+        run.container.addComponent(object : DefaultProjectDependencyAnalyzer() {
+            override fun buildDependencyClasses(project: MavenProject?): MutableSet<String> {
 
-        mojo.execute()
+//
+//                try {
+//                    val jarEntries = jarFile.entries()
+//
+//                    val classes = HashSet<String>()
+//
+//                    while (jarEntries.hasMoreElements()) {
+//                        val entry = jarEntries.nextElement().getName()
+//                        if (entry.endsWith(".class")) {
+//                            var className = entry.replace('/', '.')
+//                            className = className.substring(0, className.length - ".class".length)
+//                            classes.add(className)
+//                        }
+//                    }
+//
+//                    artifactClassMap.put(artifact, classes)
+//                } finally {
+//                    try {
+//                        jarFile.close()
+//                    } catch (ignore: IOException) {
+//                        // ingore
+//                    }
+//
+//                }
 
-        val rootNode = mojo.dependencyGraph
-        println(rootNode)
+
+                return super.buildDependencyClasses(project)
+            }
+        }, ProjectDependencyAnalyzer::class.java, "custom")
+
+        val analyzer = run.container.lookup(ProjectDependencyAnalyzer::class.java, "custom")
+
+        val resolver = run.container.lookup(LifecycleDependencyResolver::class.java)
+        resolver.resolveProjectDependencies(
+            project,
+            listOf("compile", "test"),
+            listOf("compile", "test"),
+            session,
+            false,
+            setOf()
+        )
+
+        val analysis = analyzer.analyze(project)
+        analysis.unusedDeclaredArtifacts.forEach {
+            println(it)
+        }
+
+//        val mojoExecution = run.newMojoExecution("tree")
+//        val mojo = run.lookupConfiguredMojo(session, mojoExecution) as TreeMojo
+//
+//        mojo.execute()
+//
+//        val rootNode = mojo.dependencyGraph
     } catch (ex: Exception) {
         throw RuntimeException(ex)
     } finally {
