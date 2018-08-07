@@ -6,6 +6,11 @@ import org.apache.maven.artifact.repository.ArtifactRepository
 import org.apache.maven.artifact.repository.ArtifactRepositoryPolicy
 import org.apache.maven.artifact.repository.MavenArtifactRepository
 import org.apache.maven.artifact.repository.layout.DefaultRepositoryLayout
+import org.apache.maven.artifact.resolver.ArtifactResolutionRequest
+import org.apache.maven.artifact.resolver.ArtifactResolver
+import org.apache.maven.artifact.resolver.DefaultArtifactResolver
+import org.apache.maven.artifact.resolver.filter.ArtifactFilter
+import org.apache.maven.artifact.resolver.filter.CumulativeScopeArtifactFilter
 import org.apache.maven.execution.*
 import org.apache.maven.lifecycle.internal.LifecycleDependencyResolver
 import org.apache.maven.lifecycle.internal.MojoDescriptorCreator
@@ -47,6 +52,8 @@ import org.sonatype.aether.transfer.TransferListener
 
 import java.io.*
 import java.util.*
+import java.util.jar.JarFile
+import java.util.jar.JarInputStream
 import kotlin.coroutines.experimental.coroutineContext
 
 class Run(baseDir: String) {
@@ -239,7 +246,9 @@ fun main(args: Array<String>) {
         )
 
         val project = prjBuildResult.project
-
+        project.setArtifactFilter(CumulativeScopeArtifactFilter(
+            setOf("compile")
+        ))
 
         val request = DefaultMavenExecutionRequest()
         val result = DefaultMavenExecutionResult()
@@ -249,53 +258,68 @@ fun main(args: Array<String>) {
         session.currentProject = project
         session.projects = listOf(project)
 
-        run.container.addComponent(object : DefaultProjectDependencyAnalyzer() {
-            override fun buildDependencyClasses(project: MavenProject?): MutableSet<String> {
+        val artifactResolver = run.container.lookup(ArtifactResolver::class.java)
+        val res = ArtifactResolutionRequest()
+        res.artifact = project.artifact
+        res.localRepository = repo
+        res.remoteRepositories = listOf(mavenCentral)
+        val art = artifactResolver.resolve(res).artifacts.first()
 
-//
-//                try {
-//                    val jarEntries = jarFile.entries()
-//
-//                    val classes = HashSet<String>()
-//
-//                    while (jarEntries.hasMoreElements()) {
-//                        val entry = jarEntries.nextElement().getName()
-//                        if (entry.endsWith(".class")) {
-//                            var className = entry.replace('/', '.')
-//                            className = className.substring(0, className.length - ".class".length)
-//                            classes.add(className)
-//                        }
-//                    }
-//
-//                    artifactClassMap.put(artifact, classes)
-//                } finally {
-//                    try {
-//                        jarFile.close()
-//                    } catch (ignore: IOException) {
-//                        // ingore
-//                    }
-//
-//                }
+        val dependencyAnalyzer = run.container.lookup(DependencyAnalyzer::class.java)
+
+        run.container.addComponent(
+            object : DefaultProjectDependencyAnalyzer() {
+                override fun buildDependencyClasses(project: MavenProject?): MutableSet<String> {
+                    val classes = HashSet<String>()
+                    val file = art.file
+                    val dir = File(file.parent, file.name.replace(".jar", "-classes"))
+                    dir.mkdirs()
+                    JarFile(file).use { jarFile ->
+                        val jarEntries = jarFile.entries()
 
 
-                return super.buildDependencyClasses(project)
-            }
-        }, ProjectDependencyAnalyzer::class.java, "custom")
+                        while (jarEntries.hasMoreElements()) {
+                            val nextElement = jarEntries.nextElement()
+                            val entry = nextElement.getName()
+                            if (entry.endsWith(".class")) {
+                                val dest = File(dir, entry)
+                                dest.parentFile.mkdirs()
+
+                                FileOutputStream(dest).use { out ->
+                                    jarFile.getInputStream(nextElement).copyTo(out)
+                                }
+
+                                var className = entry.replace('/', '.')
+                                className = className.substring(0, className.length - ".class".length)
+                                classes.add(className)
+                            }
+                        }
+                    }
+
+                    return dependencyAnalyzer.analyze(dir.toURI().toURL())
+                }
+            }, ProjectDependencyAnalyzer::
+            class.java, "custom"
+        )
 
         val analyzer = run.container.lookup(ProjectDependencyAnalyzer::class.java, "custom")
 
         val resolver = run.container.lookup(LifecycleDependencyResolver::class.java)
         resolver.resolveProjectDependencies(
             project,
-            listOf("compile", "test"),
-            listOf("compile", "test"),
+            listOf("compile"),
+            listOf("compile"),
             session,
             false,
             setOf()
         )
 
         val analysis = analyzer.analyze(project)
+
         analysis.unusedDeclaredArtifacts.forEach {
+            println(it)
+        }
+        analysis.usedUndeclaredArtifacts.forEach {
             println(it)
         }
 
