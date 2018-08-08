@@ -72,5 +72,9 @@ class CachedExecutor<K, R>(
 
         return deferred
     }
+
+    fun stop() {
+        channel.close()
+    }
 }
 

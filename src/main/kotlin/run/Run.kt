@@ -8,15 +8,10 @@ import org.apache.maven.artifact.repository.MavenArtifactRepository
 import org.apache.maven.artifact.repository.layout.DefaultRepositoryLayout
 import org.apache.maven.artifact.resolver.ArtifactResolutionRequest
 import org.apache.maven.artifact.resolver.ArtifactResolver
-import org.apache.maven.artifact.resolver.DefaultArtifactResolver
-import org.apache.maven.artifact.resolver.filter.ArtifactFilter
 import org.apache.maven.artifact.resolver.filter.CumulativeScopeArtifactFilter
 import org.apache.maven.execution.*
 import org.apache.maven.lifecycle.internal.LifecycleDependencyResolver
 import org.apache.maven.lifecycle.internal.MojoDescriptorCreator
-import org.apache.maven.lifecycle.internal.MojoExecutor
-import org.apache.maven.lifecycle.internal.ProjectIndex
-import org.apache.maven.model.Dependency
 import org.apache.maven.model.Plugin
 import org.apache.maven.plugin.Mojo
 import org.apache.maven.plugin.MojoExecution
@@ -24,23 +19,17 @@ import org.apache.maven.plugin.PluginParameterExpressionEvaluator
 import org.apache.maven.plugin.descriptor.MojoDescriptor
 import org.apache.maven.plugin.descriptor.Parameter
 import org.apache.maven.plugin.descriptor.PluginDescriptorBuilder
-import org.apache.maven.plugins.dependency.tree.TreeMojo
-import org.apache.maven.project.DefaultProjectBuilder
 import org.apache.maven.project.DefaultProjectBuildingRequest
 import org.apache.maven.project.MavenProject
 import org.apache.maven.project.ProjectBuilder
 import org.apache.maven.repository.RepositorySystem
 import org.apache.maven.repository.internal.MavenRepositorySystemSession
-import org.apache.maven.repository.legacy.TransferListenerAdapter
-import org.apache.maven.settings.Mirror
-import org.apache.maven.settings.Proxy
 import org.apache.maven.shared.dependency.analyzer.DefaultProjectDependencyAnalyzer
 import org.apache.maven.shared.dependency.analyzer.DependencyAnalyzer
 import org.apache.maven.shared.dependency.analyzer.ProjectDependencyAnalyzer
 import org.codehaus.plexus.*
 import org.codehaus.plexus.classworlds.ClassWorld
 import org.codehaus.plexus.component.configurator.ComponentConfigurator
-import org.codehaus.plexus.component.repository.ComponentDescriptor
 import org.codehaus.plexus.configuration.xml.XmlPlexusConfiguration
 import org.codehaus.plexus.util.InterpolationFilterReader
 import org.codehaus.plexus.util.ReaderFactory
@@ -49,12 +38,12 @@ import org.codehaus.plexus.util.xml.Xpp3Dom
 import org.sonatype.aether.impl.internal.SimpleLocalRepositoryManager
 import org.sonatype.aether.transfer.TransferEvent
 import org.sonatype.aether.transfer.TransferListener
+import org.sonatype.aether.transfer.TransferResource
 
 import java.io.*
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 import java.util.jar.JarFile
-import java.util.jar.JarInputStream
-import kotlin.coroutines.experimental.coroutineContext
 
 class Run(baseDir: String) {
     private val classWorld = ClassWorld("plexus.core", Thread.currentThread().contextClassLoader)
@@ -173,6 +162,38 @@ class Run(baseDir: String) {
 
 }
 
+class DownloadNotifier {
+    private val downloads = Collections.newSetFromMap(ConcurrentHashMap<Download, Boolean>())
+
+    fun downloads() = downloads.toList().sortedBy { it.start }
+
+    fun startDownload(url: String): Download {
+        val download = Download(url)
+        downloads.add(download)
+        return download
+    }
+
+    inner class Download(val url: String) {
+        val start = System.currentTimeMillis()
+
+        @Volatile
+        var indetermined: Boolean = true
+
+        @Volatile
+        var progress: Double = 0.0
+
+        fun progress(transferred: Long, len: Long) {
+            indetermined = false
+            progress = transferred.toDouble() / len
+        }
+
+        fun done() {
+            progress = 1.0
+            downloads.remove(this)
+        }
+    }
+}
+
 
 fun main(args: Array<String>) {
     val baseDir = File("").absolutePath
@@ -180,31 +201,43 @@ fun main(args: Array<String>) {
     try {
 
         val repositorySystemSession = MavenRepositorySystemSession()
+
+        val downloadNotifier = DownloadNotifier()
+
         repositorySystemSession.transferListener = object : TransferListener {
+            val map = ConcurrentHashMap<TransferResource, DownloadNotifier.Download>()
+
             override fun transferStarted(event: TransferEvent) {
-                println("Started ${event.resource}")
             }
 
             override fun transferInitiated(event: TransferEvent) {
-                println("Initiated ${event.resource}")
+                map.computeIfAbsent(event.resource, {
+                    downloadNotifier.startDownload(event.resource.repositoryUrl + event.resource.resourceName)
+                })
             }
 
             override fun transferSucceeded(event: TransferEvent) {
-                println("Succeded ${event.resource}")
+                map.remove(event.resource)?.done()
             }
 
             override fun transferProgressed(event: TransferEvent) {
-                println("Progressed ${event.resource}")
+                val download = map.get(event.resource) ?: return
+                val len = event.resource.contentLength
+                if (len != -1L) {
+                    download.progress(event.transferredBytes, len)
+                }
             }
 
             override fun transferCorrupted(event: TransferEvent) {
-                println("Corrupted ${event.resource}")
             }
 
-            override fun transferFailed(event: TransferEvent?) {
-                TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
+            override fun transferFailed(event: TransferEvent) {
+                map.remove(event.resource)?.done()
             }
         }
+
+
+
 
         repositorySystemSession.localRepositoryManager = SimpleLocalRepositoryManager(
             File("/home/oleksiyp/workspace/dep-tree-maven/repo")
