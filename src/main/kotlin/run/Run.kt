@@ -19,22 +19,25 @@ import org.apache.maven.plugin.PluginParameterExpressionEvaluator
 import org.apache.maven.plugin.descriptor.MojoDescriptor
 import org.apache.maven.plugin.descriptor.Parameter
 import org.apache.maven.plugin.descriptor.PluginDescriptorBuilder
-import org.apache.maven.project.DefaultProjectBuildingRequest
-import org.apache.maven.project.MavenProject
-import org.apache.maven.project.ProjectBuilder
+import org.apache.maven.project.*
 import org.apache.maven.repository.RepositorySystem
 import org.apache.maven.repository.internal.MavenRepositorySystemSession
 import org.apache.maven.shared.dependency.analyzer.DefaultProjectDependencyAnalyzer
 import org.apache.maven.shared.dependency.analyzer.DependencyAnalyzer
 import org.apache.maven.shared.dependency.analyzer.ProjectDependencyAnalyzer
+import org.apache.maven.shared.dependency.graph.DependencyGraphBuilder
+import org.apache.maven.shared.dependency.graph.DependencyNode
 import org.codehaus.plexus.*
 import org.codehaus.plexus.classworlds.ClassWorld
+import org.codehaus.plexus.classworlds.realm.ClassRealm
 import org.codehaus.plexus.component.configurator.ComponentConfigurator
+import org.codehaus.plexus.component.repository.ComponentDescriptor
 import org.codehaus.plexus.configuration.xml.XmlPlexusConfiguration
 import org.codehaus.plexus.util.InterpolationFilterReader
 import org.codehaus.plexus.util.ReaderFactory
 import org.codehaus.plexus.util.StringUtils
 import org.codehaus.plexus.util.xml.Xpp3Dom
+import org.sonatype.aether.graph.DependencyFilter
 import org.sonatype.aether.impl.internal.SimpleLocalRepositoryManager
 import org.sonatype.aether.transfer.TransferEvent
 import org.sonatype.aether.transfer.TransferListener
@@ -279,9 +282,11 @@ fun main(args: Array<String>) {
         )
 
         val project = prjBuildResult.project
-        project.setArtifactFilter(CumulativeScopeArtifactFilter(
-            setOf("compile")
-        ))
+        project.setArtifactFilter(
+            CumulativeScopeArtifactFilter(
+                setOf("compile")
+            )
+        )
 
         val request = DefaultMavenExecutionRequest()
         val result = DefaultMavenExecutionResult()
@@ -291,77 +296,79 @@ fun main(args: Array<String>) {
         session.currentProject = project
         session.projects = listOf(project)
 
-        val artifactResolver = run.container.lookup(ArtifactResolver::class.java)
-        val res = ArtifactResolutionRequest()
-        res.artifact = project.artifact
-        res.localRepository = repo
-        res.remoteRepositories = listOf(mavenCentral)
-        val art = artifactResolver.resolve(res).artifacts.first()
+//        val artifactResolver = run.container.lookup(ArtifactResolver::class.java)
+//        val res = ArtifactResolutionRequest()
+//        res.artifact = project.artifact
+//        res.localRepository = repo
+//        res.remoteRepositories = listOf(mavenCentral)
+//        val art = artifactResolver.resolve(res).artifacts.first()
+//
+//        val dependencyAnalyzer = run.container.lookup(DependencyAnalyzer::class.java)
 
-        val dependencyAnalyzer = run.container.lookup(DependencyAnalyzer::class.java)
+//        run.container.addComponent(
+//            object : DefaultProjectDependencyAnalyzer() {
+//                override fun buildDependencyClasses(project: MavenProject?): MutableSet<String> {
+//                    val classes = HashSet<String>()
+//                    val file = art.file
+//                    val dir = File(file.parent, file.name.replace(".jar", "-classes"))
+//                    dir.mkdirs()
+//                    JarFile(file).use { jarFile ->
+//                        val jarEntries = jarFile.entries()
+//
+//
+//                        while (jarEntries.hasMoreElements()) {
+//                            val nextElement = jarEntries.nextElement()
+//                            val entry = nextElement.getName()
+//                            if (entry.endsWith(".class")) {
+//                                val dest = File(dir, entry)
+//                                dest.parentFile.mkdirs()
+//
+//                                FileOutputStream(dest).use { out ->
+//                                    jarFile.getInputStream(nextElement).copyTo(out)
+//                                }
+//
+//                                var className = entry.replace('/', '.')
+//                                className = className.substring(0, className.length - ".class".length)
+//                                classes.add(className)
+//                            }
+//                        }
+//                    }
+//
+//                    return dependencyAnalyzer.analyze(dir.toURI().toURL())
+//                }
+//            }, ProjectDependencyAnalyzer::
+//            class.java, "custom"
+//        )
 
-        run.container.addComponent(
-            object : DefaultProjectDependencyAnalyzer() {
-                override fun buildDependencyClasses(project: MavenProject?): MutableSet<String> {
-                    val classes = HashSet<String>()
-                    val file = art.file
-                    val dir = File(file.parent, file.name.replace(".jar", "-classes"))
-                    dir.mkdirs()
-                    JarFile(file).use { jarFile ->
-                        val jarEntries = jarFile.entries()
 
+        prjBuildRequest.project = project
 
-                        while (jarEntries.hasMoreElements()) {
-                            val nextElement = jarEntries.nextElement()
-                            val entry = nextElement.getName()
-                            if (entry.endsWith(".class")) {
-                                val dest = File(dir, entry)
-                                dest.parentFile.mkdirs()
-
-                                FileOutputStream(dest).use { out ->
-                                    jarFile.getInputStream(nextElement).copyTo(out)
-                                }
-
-                                var className = entry.replace('/', '.')
-                                className = className.substring(0, className.length - ".class".length)
-                                classes.add(className)
-                            }
-                        }
-                    }
-
-                    return dependencyAnalyzer.analyze(dir.toURI().toURL())
+        val dependenciesResolver = run.container.lookup(ProjectDependenciesResolver::class.java)
+        class Resolver : ProjectDependenciesResolver {
+            override fun resolve(request: DependencyResolutionRequest): DependencyResolutionResult {
+                request.resolutionFilter = DependencyFilter { x, y ->
+                    false
                 }
-            }, ProjectDependencyAnalyzer::
-            class.java, "custom"
-        )
-
-        val analyzer = run.container.lookup(ProjectDependencyAnalyzer::class.java, "custom")
-
-        val resolver = run.container.lookup(LifecycleDependencyResolver::class.java)
-        resolver.resolveProjectDependencies(
-            project,
-            listOf("compile"),
-            listOf("compile"),
-            session,
-            false,
-            setOf()
-        )
-
-        val analysis = analyzer.analyze(project)
-
-        analysis.unusedDeclaredArtifacts.forEach {
-            println(it)
+                return dependenciesResolver.resolve(request)
+            }
         }
-        analysis.usedUndeclaredArtifacts.forEach {
-            println(it)
+        run.container.addComponent(Resolver(), ProjectDependenciesResolver::class.java, "")
+
+        val resolver = run.container.lookup(DependencyGraphBuilder::class.java)
+
+        val graph = resolver.buildDependencyGraph(prjBuildRequest, null)
+
+
+        fun visit(node: DependencyNode, depth: Int = 0) {
+            repeat(depth) { print(' ') }
+            println(node.toNodeString())
+            node.children.forEach {
+                visit(it, depth + 1)
+            }
         }
 
-//        val mojoExecution = run.newMojoExecution("tree")
-//        val mojo = run.lookupConfiguredMojo(session, mojoExecution) as TreeMojo
-//
-//        mojo.execute()
-//
-//        val rootNode = mojo.dependencyGraph
+        visit(graph)
+
     } catch (ex: Exception) {
         throw RuntimeException(ex)
     } finally {
