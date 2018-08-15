@@ -7,17 +7,34 @@ import java.util.concurrent.ConcurrentHashMap
 
 class CachedExecutor<K, R>(
     val nWorkers: Int,
-    val cacheTime: Long
+    val cacheTime: Long,
+    var listener: (suspend (K, R?, Exception?) -> Unit)? = null
 ) {
     inner class DeferredTask(
         val key: K,
         val taskFunc: suspend () -> R,
-        val deferred: CompletableDeferred<R>,
-        var evictJob: Job? = null
+        val deferred: CompletableDeferred<R>
     )
 
-    val map = ConcurrentHashMap<K, DeferredTask>()
+    inner class CacheEntry(
+        val key: K,
+        val result: R,
+        var job: Job? = null
+    )
 
+    fun addCache(key: K, value: R) {
+        val entry = CacheEntry(key, value)
+        entry.job = launch {
+            delay(cacheTime)
+            cache.remove(key)
+        }
+        val oldEntry = cache.put(key, entry)
+        oldEntry?.job?.cancel()
+        map[key]?.deferred?.complete(value)
+    }
+
+    private val cache = ConcurrentHashMap<K, CacheEntry>()
+    private val map = ConcurrentHashMap<K, DeferredTask>()
     private val channel = Channel<DeferredTask>(100 * 1024)
 
     init {
@@ -27,8 +44,10 @@ class CachedExecutor<K, R>(
                     try {
                         val result = record.taskFunc()
                         record.deferred.complete(result)
+                        listener?.invoke(record.key, result, null)
                     } catch (ex: Exception) {
                         record.deferred.completeExceptionally(ex)
+                        listener?.invoke(record.key, null, ex)
                     }
 
                     if (cacheTime <= 0) {
@@ -51,8 +70,9 @@ class CachedExecutor<K, R>(
         taskFunc: suspend () -> R
     ): Deferred<R> {
 
-        val task = DeferredTask(key, taskFunc, CompletableDeferred())
+        cache[key]?.result?.let { return CompletableDeferred(it) }
 
+        val task = DeferredTask(key, taskFunc, CompletableDeferred())
         val otherTask = map.putIfAbsent(key, task)
         val deferred = if (otherTask != null) {
             otherTask.deferred

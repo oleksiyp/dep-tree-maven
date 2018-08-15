@@ -1,6 +1,7 @@
 package run
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.kotlin.jacksonTypeRef
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.google.common.net.HostAndPort
 import com.orbitz.consul.Consul
@@ -23,10 +24,7 @@ import io.netty.handler.codec.ByteToMessageCodec
 import io.netty.handler.codec.LineBasedFrameDecoder
 import io.netty.util.ReferenceCountUtil
 import io.netty.util.concurrent.Future
-import kotlinx.coroutines.experimental.CompletableDeferred
-import kotlinx.coroutines.experimental.async
-import kotlinx.coroutines.experimental.launch
-import kotlinx.coroutines.experimental.runBlocking
+import kotlinx.coroutines.experimental.*
 import kotlinx.coroutines.experimental.selects.select
 import java.io.InputStream
 import java.io.OutputStream
@@ -299,31 +297,59 @@ suspend fun <T> Future<T>.waitComplete(): T {
     }
 }
 
-fun main(args: Array<String>) {
-    val node1 = DistributedMessageBus("ms", listOf("org1"), 65431 downTo 1)
-    val node2 = DistributedMessageBus("ms", listOf("org1"), 65431 downTo 1)
-    val node3 = DistributedMessageBus("ms", listOf("org1"), 65431 downTo 1)
+class Node {
+    val mapper = ObjectMapper()
+        .registerKotlinModule()
 
-    node1.listeners += { println("node1: $it") }
-    node2.listeners += { println("node2: $it") }
-    node3.listeners += { println("node3: $it") }
+    val messageBus = DistributedMessageBus("ms", listOf("org1"), 65431 downTo 1)
 
-    Thread.sleep(5000)
+    val cachedExecutor = CachedExecutor<String, String>(
+        5, 1500, { key, value, exception -> calculationDone(key, value, exception) }
+    )
 
-    runBlocking {
-        for (i in 1..100) {
-            node1.broadcast(
-                Message("abc$i", "def1"),
-                Message("abc$i", "def2"),
-                Message("abc$i", "def3"),
-                Message("abc$i", "def4"),
-                Message("abc$i", "def5"),
-                Message("abc$i", "def6"),
-                Message("abc$i", "def7")
-            )
+    init {
+        messageBus.listeners += {
+            val keyValue = mapper.readValue<Pair<String, String>>(it.msg, jacksonTypeRef<Pair<String, String>>())
+            cachedExecutor.addCache(keyValue.first, keyValue.second)
         }
     }
 
+
+    private suspend fun calculationDone(key: String, value: String?, exception: Exception?) {
+        println("$key $value $exception")
+
+        val msg = mapper.writeValueAsString(Pair(key, value))
+        messageBus.broadcast(Message("cache", msg))
+    }
+
+    fun close() {
+        cachedExecutor.stop()
+        messageBus.close()
+    }
+}
+
+fun main(args: Array<String>) {
+    val node1 = Node()
+    val node2 = Node()
+    val node3 = Node()
+
+    runBlocking {
+        node1.cachedExecutor.submit("abc") {
+            delay(1000)
+            "def"
+        }.await()
+        delay(1000)
+        val res = node2.cachedExecutor.submit("abc") {
+            delay(1000)
+            "ghi"
+        }.await()
+        delay(1000)
+        val res2 = node3.cachedExecutor.submit("abc") {
+            delay(1000)
+            "klm"
+        }.await()
+        println(res + " " + res2)
+    }
     node1.close()
     node2.close()
     node3.close()
