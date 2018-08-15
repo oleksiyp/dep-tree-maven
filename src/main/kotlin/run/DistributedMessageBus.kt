@@ -139,7 +139,7 @@ class DistributedMessageBus(
     suspend fun broadcast(org: String, vararg message: Message) {
         activeNodes(org).map { node ->
             val addr = InetSocketAddress(node.host, node.port)
-            println("SEND $node ${message.joinToString(", ")}")
+//            println("SEND $node ${message.joinToString(", ")}")
             async {
                 val pool = poolMap[addr]
                 val channel = pool

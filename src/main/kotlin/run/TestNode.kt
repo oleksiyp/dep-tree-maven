@@ -13,6 +13,7 @@ import io.ktor.routing.routing
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import kotlinx.coroutines.experimental.delay
+import kotlinx.coroutines.experimental.launch
 import java.net.BindException
 import java.net.ServerSocket
 import java.util.*
@@ -57,15 +58,15 @@ class TestNode(vararg val orgs: String) {
             routing {
                 for (org in orgs) {
                     get("/$org/test") {
-                        val value = cachedExecutor.submit(org) {
+                        val value = cachedExecutor.submit(OrgKey(org, call.parameters["key"] ?: "default")) {
                             //                        if (rnd.nextDouble() > 0.8) {
 //                            throw Exception(this + "value")
 //                        } else {
                             delay(rnd.nextInt(2500) + 500)
-                            "$org value " + rnd.nextLong()
+                            "$this value " + rnd.nextLong()
 //                        }
                         }
-                        call.respond(httpPort.toString() + " " +value.await() )
+                        call.respond(httpPort.toString() + " " + value.await())
                     }
                 }
                 get {
@@ -90,25 +91,35 @@ class TestNode(vararg val orgs: String) {
         println("Discovered: " + registry.activeNodes)
     }
 
-    val listener: suspend (String, String?, Exception?) -> Unit =
+    val listener: suspend (OrgKey, String?, Exception?) -> Unit =
         { key, value, exception -> calculationDone(key, value, exception) }
 
-    val cachedExecutor = CachedExecutor<String, String>(
-        5, 5000, listener
+    val cachedExecutor = CachedExecutor<OrgKey, String>(
+        1   , 5000, listener, 10
     )
+
+    val printJob = launch {
+        while (isActive) {
+            delay(1000)
+            val use = cachedExecutor.use()
+            if (use.isNonZero()) {
+                println(orgs.joinToString("-") + " " + use)
+            }
+        }
+    }
 
     init {
         messageBus.listeners += {
             if (it.type == "cache") {
-                val keyValue = mapper.readValue<Pair<String, String>>(
+                val keyValue = mapper.readValue<Pair<OrgKey, String>>(
                     it.msg,
-                    jacksonTypeRef<Pair<String, String>>()
+                    jacksonTypeRef<Pair<OrgKey, String>>()
                 )
                 cachedExecutor.addCache(keyValue.first, keyValue.second)
             } else if (it.type == "cache-exception") {
-                val keyValue = mapper.readValue<Pair<String, String>>(
+                val keyValue = mapper.readValue<Pair<OrgKey, String>>(
                     it.msg,
-                    jacksonTypeRef<Pair<String, String>>()
+                    jacksonTypeRef<Pair<OrgKey, String>>()
                 )
                 cachedExecutor.addCacheException(keyValue.first, Exception(keyValue.second))
             }
@@ -116,17 +127,18 @@ class TestNode(vararg val orgs: String) {
     }
 
 
-    private suspend fun calculationDone(key: String, value: String?, exception: Exception?) {
+    private suspend fun calculationDone(key: OrgKey, value: String?, exception: Exception?) {
         if (value != null) {
             val msg = mapper.writeValueAsString(Pair(key, value))
-            messageBus.broadcast(key, Message("cache", msg))
+            messageBus.broadcast(key.org, Message("cache", msg))
         } else if (exception != null) {
             val msg = mapper.writeValueAsString(Pair(key, exception.message))
-            messageBus.broadcast(key, Message("cache-exception", msg))
+            messageBus.broadcast(key.org, Message("cache-exception", msg))
         }
     }
 
     fun close() {
+        printJob.cancel()
         cachedExecutor.stop()
         messageBus.close()
         registry.stop()
