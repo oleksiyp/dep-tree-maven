@@ -2,7 +2,11 @@ package run
 
 import com.google.common.net.HostAndPort
 import com.orbitz.consul.Consul
+import com.orbitz.consul.model.agent.Check
+import com.orbitz.consul.model.agent.ImmutableCheck
+import com.orbitz.consul.model.agent.ImmutableRegCheck
 import com.orbitz.consul.model.catalog.ImmutableCatalogRegistration
+import com.orbitz.consul.model.health.ImmutableHealthCheck
 import com.orbitz.consul.model.health.ImmutableService
 import kotlinx.coroutines.experimental.CompletableDeferred
 import kotlinx.coroutines.experimental.runBlocking
@@ -29,25 +33,24 @@ class ServiceRegistry(
     var activeNodes: Map<String, Map<String, List<Registration>>> =
         categories.map { it to mapOf<String, List<Registration>>() }.toMap()
 
-    val registered = Collections.synchronizedMap(mutableMapOf<String, Int>())
+    val registered = Collections.synchronizedMap(mutableMapOf<String, Registration>())
 
     fun announcePort(category: String, port: Int, vararg tags: String) {
-        consul.catalogClient().register(
-            ImmutableCatalogRegistration.builder()
-                .address(host)
-                .node(serviceName)
-                .service(
-                    ImmutableService.builder()
-                        .id("$category-$clusterName-$host-$port")
-                        .service("$category-$serviceName")
-                        .addAllTags(federations + tags.toList() + category)
-                        .port(port)
-                        .address(host)
-                        .build()
-                )
-                .build()
+        consul.agentClient().register(
+            port,
+            ImmutableRegCheck.builder()
+                .tcp("$host:$port")
+                .interval("10s")
+                .timeout("10s")
+                .deregisterCriticalServiceAfter("1m")
+                .build(),
+            "$category-$serviceName",
+            "$category-$clusterName-$host-$port",
+            tags.toList(),
+            mutableMapOf()
         )
-        registered[category] = port
+
+        registered[category] = Registration(host, port, tags.toList())
     }
 
 
@@ -71,7 +74,11 @@ class ServiceRegistry(
                         val isFromCategory = serviceDef.serviceTags.contains(category)
                         val isFromFederation = serviceDef.serviceTags.contains(federation)
                         if (isFromCategory && isFromFederation) {
-                            Registration(serviceDef.serviceAddress, serviceDef.servicePort)
+                            Registration(
+                                serviceDef.serviceAddress,
+                                serviceDef.servicePort,
+                                serviceDef.serviceTags
+                            )
                         } else {
                             null
                         }
@@ -88,7 +95,7 @@ class ServiceRegistry(
             discoverServices()
             firstDiscoveryIterationDone.complete(true)
             try {
-                Thread.sleep(1000)
+                Thread.sleep(10000)
             } catch (ex: InterruptedException) {
                 break
             }
