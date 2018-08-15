@@ -12,12 +12,13 @@ class CachedExecutor<K, R>(
     inner class DeferredTask(
         val key: K,
         val taskFunc: suspend () -> R,
-        val deferred: CompletableDeferred<R>
+        val deferred: CompletableDeferred<R>,
+        var evictJob: Job? = null
     )
 
     val map = ConcurrentHashMap<K, DeferredTask>()
 
-    private val channel = Channel<DeferredTask>()
+    private val channel = Channel<DeferredTask>(100 * 1024)
 
     init {
         repeat(nWorkers) {
