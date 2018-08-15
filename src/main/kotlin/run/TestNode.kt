@@ -26,8 +26,9 @@ class TestNode(vararg val orgs: String) {
         orgs.toList(),
         listOf("bus", "http")
     )
-    val activeNodes = { org: String -> (registry.activeNodes["bus"] ?: mapOf())[org] ?: listOf() }
-    val messageBus = DistributedMessageBus(65431 downTo 1, activeNodes)
+
+    val busActiveNodes = { org: String -> (registry.activeNodes["bus"] ?: mapOf())[org] ?: listOf() }
+    val messageBus = DistributedMessageBus(65431 downTo 1, busActiveNodes)
 
     init {
         registry.announcePort("bus", messageBus.port)
@@ -64,7 +65,7 @@ class TestNode(vararg val orgs: String) {
                             "$org value " + rnd.nextLong()
 //                        }
                         }
-                        call.respond(value.await())
+                        call.respond(httpPort.toString() + " " +value.await() )
                     }
                 }
                 get {
@@ -83,6 +84,10 @@ class TestNode(vararg val orgs: String) {
             "traefik.enable=true",
             "traefik.frontend.rule=Host:localhost;PathPrefix:$pathes"
         )
+
+        registry.startDiscovery()
+
+        println("Discovered: " + registry.activeNodes)
     }
 
     val listener: suspend (String, String?, Exception?) -> Unit =
@@ -124,6 +129,7 @@ class TestNode(vararg val orgs: String) {
     fun close() {
         cachedExecutor.stop()
         messageBus.close()
+        registry.stop()
     }
 
     override fun toString(): String {
@@ -132,10 +138,22 @@ class TestNode(vararg val orgs: String) {
 }
 
 fun main(args: Array<String>) {
-    TestNode("org1", "org2")
-    TestNode("org2", "org3")
-    TestNode("org3", "org4")
-    TestNode("org4", "org5")
-    TestNode("org5", "org6")
-    TestNode("org6", "org1")
+    val nodes = listOf(
+        TestNode("org1"),
+        TestNode("org2"),
+        TestNode("org3"),
+        TestNode("org4"),
+        TestNode("org5"),
+        TestNode("org6"),
+        TestNode("org1", "org2"),
+        TestNode("org2", "org3"),
+        TestNode("org3", "org4"),
+        TestNode("org4", "org5"),
+        TestNode("org5", "org6"),
+        TestNode("org6", "org1")
+    )
+
+    Runtime.getRuntime().addShutdownHook(Thread {
+        nodes.forEach { it.close() }
+    })
 }
