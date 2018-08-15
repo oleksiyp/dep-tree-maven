@@ -12,25 +12,33 @@ class CachedExecutor<K, R>(
 ) {
     inner class DeferredTask(
         val key: K,
-        val taskFunc: suspend () -> R,
+        val taskFunc: suspend K.() -> R,
         val deferred: CompletableDeferred<R>
     )
 
     inner class CacheEntry(
         val key: K,
-        val result: R,
+        val result: () -> R,
         var job: Job? = null
     )
 
     fun addCache(key: K, value: R) {
-        val entry = CacheEntry(key, value)
+        addCache(CacheEntry(key, { value }))
+        map[key]?.deferred?.complete(value)
+    }
+
+    private fun addCache(entry: CacheEntry) {
         entry.job = launch {
             delay(cacheTime)
-            cache.remove(key)
+            cache.remove(entry.key)
         }
-        val oldEntry = cache.put(key, entry)
+        val oldEntry = cache.put(entry.key, entry)
         oldEntry?.job?.cancel()
-        map[key]?.deferred?.complete(value)
+    }
+
+    fun addCacheException(key: K, exception: Exception) {
+        addCache(CacheEntry(key, { throw exception }))
+        map[key]?.deferred?.completeExceptionally(exception)
     }
 
     private val cache = ConcurrentHashMap<K, CacheEntry>()
@@ -42,7 +50,7 @@ class CachedExecutor<K, R>(
             launch {
                 for (record in channel) {
                     try {
-                        val result = record.taskFunc()
+                        val result = record.taskFunc(record.key)
                         record.deferred.complete(result)
                         listener?.invoke(record.key, result, null)
                     } catch (ex: Exception) {
@@ -67,10 +75,10 @@ class CachedExecutor<K, R>(
         key: K,
         waitTimeout: Long = 0,
         defaultValue: () -> R? = { null },
-        taskFunc: suspend () -> R
+        taskFunc: suspend K.() -> R
     ): Deferred<R> {
 
-        cache[key]?.result?.let { return CompletableDeferred(it) }
+        cache[key]?.result?.let { return async { it() } }
 
         val task = DeferredTask(key, taskFunc, CompletableDeferred())
         val otherTask = map.putIfAbsent(key, task)

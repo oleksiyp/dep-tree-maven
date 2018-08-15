@@ -1,13 +1,7 @@
 package run
 
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.kotlin.jacksonTypeRef
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
-import com.google.common.net.HostAndPort
-import com.orbitz.consul.Consul
-import com.orbitz.consul.model.catalog.ImmutableCatalogDeregistration
-import com.orbitz.consul.model.catalog.ImmutableCatalogRegistration
-import com.orbitz.consul.model.health.ImmutableService
 import io.netty.bootstrap.Bootstrap
 import io.netty.bootstrap.ServerBootstrap
 import io.netty.buffer.*
@@ -23,34 +17,16 @@ import io.netty.channel.socket.nio.NioSocketChannel
 import io.netty.handler.codec.ByteToMessageCodec
 import io.netty.handler.codec.LineBasedFrameDecoder
 import io.netty.util.ReferenceCountUtil
-import io.netty.util.concurrent.Future
 import kotlinx.coroutines.experimental.*
-import kotlinx.coroutines.experimental.selects.select
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.BindException
-import java.net.InetAddress
 import java.net.InetSocketAddress
-import kotlin.coroutines.experimental.suspendCoroutine
-
-data class Message(val type: String, val msg: String)
 
 class DistributedMessageBus(
-    val clusterName: String,
-    val orgs: List<String>,
     val portRange: Iterable<Int>,
-    val consulHostAndPort: String = "localhost:8500",
-    val host: String = InetAddress.getLocalHost().hostName
+    val activeNodes: (String) -> List<Registration>
 ) {
-
-    val serviceName = "$clusterName-" + orgs.sorted().joinToString("-")
-
-    private val firstDiscoveryIterationDone = CompletableDeferred<Boolean>()
-
-    private val consul = Consul.builder()
-        .withHostAndPort(HostAndPort.fromString(consulHostAndPort))
-        .build()
-
     private class ObjectMapperCodec : ByteToMessageCodec<Message>() {
         private val mapper = ObjectMapper()
             .registerKotlinModule()
@@ -69,101 +45,79 @@ class DistributedMessageBus(
 
     }
 
-    @Volatile
-    private var activeNodes: List<Pair<String, Int>> = listOf()
-
     val listeners = mutableListOf<suspend (Message) -> Unit>()
 
     private val serverBootstrap = ServerBootstrap()
-        .apply { group(NioEventLoopGroup(1), NioEventLoopGroup()) }
-        .apply { channel(NioServerSocketChannel::class.java) }
-        .apply {
-            childHandler(object : ChannelInitializer<SocketChannel>() {
-                override fun initChannel(ch: SocketChannel) {
-                    val pipeline = ch.pipeline()
-                    pipeline.addLast(LineBasedFrameDecoder(512 * 1024))
-                    pipeline.addLast(ObjectMapperCodec())
-                    pipeline.addLast(object : SimpleChannelInboundHandler<Message>() {
-                        override fun channelRead0(ctx: ChannelHandlerContext, msg: Message) {
-                            launch {
-                                listeners.forEach { it(msg) }
-                            }
+        .group(NioEventLoopGroup(1), NioEventLoopGroup())
+        .channel(NioServerSocketChannel::class.java)
+        .childHandler(object : ChannelInitializer<SocketChannel>() {
+            override fun initChannel(ch: SocketChannel) {
+                val pipeline = ch.pipeline()
+                pipeline.addLast(LineBasedFrameDecoder(512 * 1024))
+                pipeline.addLast(ObjectMapperCodec())
+                pipeline.addLast(object : SimpleChannelInboundHandler<Message>() {
+                    override fun channelRead0(ctx: ChannelHandlerContext, msg: Message) {
+                        launch {
+                            listeners.forEach { it(msg) }
                         }
-                    })
-                }
-            })
-        }
+                    }
+                })
+            }
+        })
 
 
     val port = allocatePort()
 
-    private val serviceDiscoveryThread = Thread({
-        selfRegister()
-        discoverServices()
-        while (!Thread.interrupted()) {
-            selfRegister()
-            discoverServices()
-            firstDiscoveryIterationDone.complete(true)
-            try {
-                Thread.sleep(1000)
-            } catch (ex: InterruptedException) {
-                break
-            }
-        }
-    }, "service-discovery")
-
-    init {
-        serviceDiscoveryThread.start()
-        runBlocking {
-            firstDiscoveryIterationDone.await()
-        }
-    }
-
     private val clientBootstrap = Bootstrap()
-        .apply { group(NioEventLoopGroup()) }
-        .apply { channel(NioSocketChannel::class.java) }
+        .group(NioEventLoopGroup())
+        .channel(NioSocketChannel::class.java)
 
     private val NEW_LINE = Unpooled.copiedBuffer("\n", Charsets.US_ASCII)
 
     private var poolMap = object : AbstractChannelPoolMap<InetSocketAddress, SimpleChannelPool>() {
         override fun newPool(key: InetSocketAddress): SimpleChannelPool {
-            return FixedChannelPool(clientBootstrap.clone().remoteAddress(key), object : ChannelPoolHandler {
-                override fun channelReleased(ch: Channel) {
-                    println("Released")
-                }
+            return FixedChannelPool(
+                clientBootstrap.clone().remoteAddress(key),
+                object : ChannelPoolHandler {
+                    override fun channelReleased(ch: Channel) {
+                    }
 
-                override fun channelAcquired(ch: Channel) {
-                    println("Acquired")
-                }
+                    override fun channelAcquired(ch: Channel) {
+                    }
 
 
-                override fun channelCreated(ch: Channel) {
-                    println("Created")
-                    val pipeline = ch.pipeline()
-                    pipeline.addLast(object : ChannelOutboundHandlerAdapter() {
-                        override fun write(ctx: ChannelHandlerContext, msg: Any, promise: ChannelPromise) {
-                            ReferenceCountUtil.retain(msg)
+                    override fun channelCreated(ch: Channel) {
+                        val pipeline = ch.pipeline()
+                        pipeline.addLast(object : ChannelOutboundHandlerAdapter() {
+                            override fun write(
+                                ctx: ChannelHandlerContext,
+                                msg: Any,
+                                promise: ChannelPromise
+                            ) {
+                                ReferenceCountUtil.retain(msg)
 
-                            launch {
-                                try {
-                                    ctx.writeAndFlush(msg)
-                                        .waitComplete()
+                                launch {
+                                    try {
+                                        ctx.writeAndFlush(msg)
+                                            .waitComplete()
 
-                                    ctx.writeAndFlush(NEW_LINE.retain())
-                                        .waitComplete()
+                                        ctx.writeAndFlush(NEW_LINE.retain())
+                                            .waitComplete()
 
-                                    promise.setSuccess()
-                                } catch (ex: Exception) {
-                                    promise.setFailure(ex)
-                                } finally {
-                                    ReferenceCountUtil.release(msg)
+                                        promise.setSuccess()
+                                    } catch (ex: Exception) {
+                                        promise.setFailure(ex)
+                                    } finally {
+                                        ReferenceCountUtil.release(msg)
+                                    }
                                 }
                             }
-                        }
-                    })
-                    pipeline.addLast(ObjectMapperCodec())
-                }
-            }, 10)
+                        })
+                        pipeline.addLast(ObjectMapperCodec())
+                    }
+                },
+                10
+            )
         }
     }
 
@@ -182,58 +136,10 @@ class DistributedMessageBus(
     }
 
 
-    private fun selfRegister() {
-        try {
-            consul.catalogClient().register(
-                ImmutableCatalogRegistration.builder()
-                    .address(host)
-                    .node(serviceName)
-                    .service(
-                        ImmutableService.builder()
-                            .id("$clusterName-$host-$port")
-                            .service(serviceName)
-                            .addAllTags(orgs)
-                            .port(port)
-                            .address(host)
-                            .build()
-                    )
-                    .build()
-            )
-        } catch (ex: Exception) {
-            // skip
-        }
-    }
-
-    private fun discoverServices() {
-        try {
-            val catalogClient = consul.catalogClient()
-
-            val serviceIds = catalogClient.services.response
-                .mapNotNull {
-                    val (name, tags) = it.toPair()
-                    if (tags.any { orgs.contains(it) }) {
-                        name
-                    } else {
-                        null
-                    }
-                }
-
-            activeNodes = serviceIds.flatMap {
-                try {
-                    catalogClient.getService(it).response
-                        .map { Pair(it.serviceAddress, it.servicePort) }
-                } catch (ex: Exception) {
-                    listOf<Pair<String, Int>>()
-                }
-            }
-        } catch (ex: Exception) {
-            // skip
-        }
-    }
-
-    suspend fun broadcast(vararg message: Message) {
-        activeNodes.map { node ->
-            val addr = InetSocketAddress(node.first, node.second)
+    suspend fun broadcast(org: String, vararg message: Message) {
+        activeNodes(org).map { node ->
+            val addr = InetSocketAddress(node.host, node.port)
+            println("SEND $node ${message.joinToString(", ")}")
             async {
                 val pool = poolMap[addr]
                 val channel = pool
@@ -245,6 +151,8 @@ class DistributedMessageBus(
                         channel.writeAndFlush(msg)
                             .waitComplete()
                     }
+                } catch (ex: Exception) {
+                    // skip
                 } finally {
                     pool.release(channel)
                         .waitComplete()
@@ -256,101 +164,8 @@ class DistributedMessageBus(
     }
 
     fun close() {
-        clientBootstrap.config().group().shutdownGracefully()
-
-        serviceDiscoveryThread.interrupt()
-        serviceDiscoveryThread.join()
-
-        consul.catalogClient().deregister(
-            ImmutableCatalogDeregistration.builder()
-                .node(serviceName)
-                .serviceId("m-$host-$port")
-                .build()
-        )
-
-        serverBootstrap.config().group().shutdownGracefully()
         serverBootstrap.config().childGroup().shutdownGracefully()
+        serverBootstrap.config().group().shutdownGracefully()
+        clientBootstrap.config().group().shutdownGracefully()
     }
-}
-
-suspend fun ChannelFuture.waitComplete(): Channel {
-    return suspendCoroutine<Channel> { cont ->
-        this.addListener { future ->
-            if (future.isSuccess) {
-                cont.resume(this.channel())
-            } else {
-                cont.resumeWithException(future.cause())
-            }
-        }
-    }
-}
-
-suspend fun <T> Future<T>.waitComplete(): T {
-    return suspendCoroutine<T> { cont ->
-        this.addListener { future ->
-            if (future.isSuccess) {
-                cont.resume(this.get())
-            } else {
-                cont.resumeWithException(future.cause())
-            }
-        }
-    }
-}
-
-class Node {
-    val mapper = ObjectMapper()
-        .registerKotlinModule()
-
-    val messageBus = DistributedMessageBus("ms", listOf("org1"), 65431 downTo 1)
-
-    val cachedExecutor = CachedExecutor<String, String>(
-        5, 1500, { key, value, exception -> calculationDone(key, value, exception) }
-    )
-
-    init {
-        messageBus.listeners += {
-            val keyValue = mapper.readValue<Pair<String, String>>(it.msg, jacksonTypeRef<Pair<String, String>>())
-            cachedExecutor.addCache(keyValue.first, keyValue.second)
-        }
-    }
-
-
-    private suspend fun calculationDone(key: String, value: String?, exception: Exception?) {
-        println("$key $value $exception")
-
-        val msg = mapper.writeValueAsString(Pair(key, value))
-        messageBus.broadcast(Message("cache", msg))
-    }
-
-    fun close() {
-        cachedExecutor.stop()
-        messageBus.close()
-    }
-}
-
-fun main(args: Array<String>) {
-    val node1 = Node()
-    val node2 = Node()
-    val node3 = Node()
-
-    runBlocking {
-        node1.cachedExecutor.submit("abc") {
-            delay(1000)
-            "def"
-        }.await()
-        delay(1000)
-        val res = node2.cachedExecutor.submit("abc") {
-            delay(1000)
-            "ghi"
-        }.await()
-        delay(1000)
-        val res2 = node3.cachedExecutor.submit("abc") {
-            delay(1000)
-            "klm"
-        }.await()
-        println(res + " " + res2)
-    }
-    node1.close()
-    node2.close()
-    node3.close()
 }

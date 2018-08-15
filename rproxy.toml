@@ -1,0 +1,21 @@
+logLevel = "INFO"
+
+[traefikLog]
+  filePath = "run/logs/traefik.log"
+[accessLog]
+  filePath = "run/logs/access.log"
+[entryPoints]
+  [entryPoints.http]
+  address = ":8000"
+  [entryPoints.traefik]
+  address = ":8501"
+[api]
+  entryPoint = "traefik"
+  dashboard = true
+  debug = true
+[consulCatalog]
+  endpoint = "127.0.0.1:8500"
+  exposedByDefault = false
+  domain = "localhost"
+  prefix = "traefik"
+
