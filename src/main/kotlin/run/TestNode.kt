@@ -89,10 +89,17 @@ class TestNode(vararg val orgs: String) {
     val printJob = launch {
         while (isActive) {
             delay(1000)
-            val use = cachedExecutor.use()
-            if (use.isNonZero()) {
-                println(orgs.joinToString("-") + " " + use)
+            val stats = mutableListOf<StatsEntry>()
+            cachedExecutor.reportStats(stats)
+            var has = false
+            for (entry in stats) {
+                if (!entry.isEmpty) {
+                    println(orgs.joinToString("-") + " " + entry)
+                    has = true
+                }
             }
+            if (has)
+                println()
         }
     }
 
