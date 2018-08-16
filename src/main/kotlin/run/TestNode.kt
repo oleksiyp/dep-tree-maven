@@ -1,8 +1,6 @@
 package run
 
-import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonTypeRef
-import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import io.ktor.application.call
 import io.ktor.application.install
 import io.ktor.request.uri
@@ -19,9 +17,6 @@ import java.net.ServerSocket
 import java.util.*
 
 class TestNode(vararg val orgs: String) {
-    val mapper = ObjectMapper()
-        .registerKotlinModule()
-
     val registry = ServiceRegistry(
         "ms",
         orgs.toList(),
@@ -59,12 +54,8 @@ class TestNode(vararg val orgs: String) {
                 for (org in orgs) {
                     get("/$org/test") {
                         val value = cachedExecutor.submit(OrgKey(org, call.parameters["key"] ?: "default")) {
-                            //                        if (rnd.nextDouble() > 0.8) {
-//                            throw Exception(this + "value")
-//                        } else {
                             delay(rnd.nextInt(2500) + 500)
                             "$this value " + rnd.nextLong()
-//                        }
                         }
                         call.respond(httpPort.toString() + " " + value.await())
                     }
@@ -91,11 +82,8 @@ class TestNode(vararg val orgs: String) {
         println("Discovered: " + registry.activeNodes)
     }
 
-    val listener: suspend (OrgKey, String?, Exception?) -> Unit =
-        { key, value, exception -> calculationDone(key, value, exception) }
-
     val cachedExecutor = CachedExecutor<OrgKey, String>(
-        1   , 5000, listener, 10
+        10, 5000, 500
     )
 
     val printJob = launch {
@@ -109,33 +97,14 @@ class TestNode(vararg val orgs: String) {
     }
 
     init {
-        messageBus.listeners += {
-            if (it.type == "cache") {
-                val keyValue = mapper.readValue<Pair<OrgKey, String>>(
-                    it.msg,
-                    jacksonTypeRef<Pair<OrgKey, String>>()
-                )
-                cachedExecutor.addCache(keyValue.first, keyValue.second)
-            } else if (it.type == "cache-exception") {
-                val keyValue = mapper.readValue<Pair<OrgKey, String>>(
-                    it.msg,
-                    jacksonTypeRef<Pair<OrgKey, String>>()
-                )
-                cachedExecutor.addCacheException(keyValue.first, Exception(keyValue.second))
-            }
-        }
+        cachedExecutor.bindToMessageBus(
+            EncoderDecoder("cache", jacksonTypeRef()),
+            EncoderDecoder("cache-exceptions", jacksonTypeRef()),
+            messageBus,
+            OrgKey::org
+        )
     }
 
-
-    private suspend fun calculationDone(key: OrgKey, value: String?, exception: Exception?) {
-        if (value != null) {
-            val msg = mapper.writeValueAsString(Pair(key, value))
-            messageBus.broadcast(key.org, Message("cache", msg))
-        } else if (exception != null) {
-            val msg = mapper.writeValueAsString(Pair(key, exception.message))
-            messageBus.broadcast(key.org, Message("cache-exception", msg))
-        }
-    }
 
     fun close() {
         printJob.cancel()

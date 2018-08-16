@@ -10,9 +10,10 @@ import java.util.concurrent.atomic.AtomicLong
 class CachedExecutor<K, R>(
     val nWorkers: Int,
     val cacheTime: Long,
-    var listener: (suspend (K, R?, Exception?) -> Unit)? = null,
     val queueCapacity: Int = 1024
 ) {
+    var listener: (suspend (K, R?, Exception?) -> Unit)? = null
+
     inner class DeferredTask(
         val key: K,
         val taskFunc: suspend K.() -> R,

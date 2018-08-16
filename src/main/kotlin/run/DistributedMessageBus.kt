@@ -1,7 +1,5 @@
 package run
 
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import io.netty.bootstrap.Bootstrap
 import io.netty.bootstrap.ServerBootstrap
 import io.netty.buffer.*
@@ -14,12 +12,9 @@ import io.netty.channel.pool.SimpleChannelPool
 import io.netty.channel.socket.SocketChannel
 import io.netty.channel.socket.nio.NioServerSocketChannel
 import io.netty.channel.socket.nio.NioSocketChannel
-import io.netty.handler.codec.ByteToMessageCodec
 import io.netty.handler.codec.LineBasedFrameDecoder
 import io.netty.util.ReferenceCountUtil
 import kotlinx.coroutines.experimental.*
-import java.io.InputStream
-import java.io.OutputStream
 import java.net.BindException
 import java.net.InetSocketAddress
 
@@ -27,24 +22,6 @@ class DistributedMessageBus(
     val portRange: Iterable<Int>,
     val activeNodes: (String) -> List<Registration>
 ) {
-    private class ObjectMapperCodec : ByteToMessageCodec<Message>() {
-        private val mapper = ObjectMapper()
-            .registerKotlinModule()
-
-        override fun encode(ctx: ChannelHandlerContext, msg: Message, out: ByteBuf) {
-            ByteBufOutputStream(out).use {
-                mapper.writeValue(it as OutputStream, msg)
-            }
-        }
-
-        override fun decode(ctx: ChannelHandlerContext, input: ByteBuf, out: MutableList<Any>) {
-            val inputStream = ByteBufInputStream(input) as InputStream
-            val decodedMessage = mapper.readValue(inputStream, Message::class.java)
-            out.add(decodedMessage)
-        }
-
-    }
-
     val listeners = mutableListOf<suspend (Message) -> Unit>()
 
     private val serverBootstrap = ServerBootstrap()
@@ -139,7 +116,6 @@ class DistributedMessageBus(
     suspend fun broadcast(org: String, vararg message: Message) {
         activeNodes(org).map { node ->
             val addr = InetSocketAddress(node.host, node.port)
-//            println("SEND $node ${message.joinToString(", ")}")
             async {
                 val pool = poolMap[addr]
                 val channel = pool
